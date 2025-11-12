@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Contextual Chat Assistant</title>
+<style>
+  body{margin:0;font-family:Arial,sans-serif;display:flex;height:100vh;}
+#left,#right{flex:1;padding:20px;box-sizing:border-box;}
+#left{display:flex;flex-direction:column;border-right:2px solid #ccc;}
+#chatBox{flex:1;overflow-y:auto;border:1px solid #ddd;padding:12px;border-radius:8px;background:#fafafa;line-height:1.35em;}
+.message{margin:6px 0;padding:6px 10px;border-radius:8px;max-width:95%;word-wrap:break-word;}
+.user{color:#0044cc;background:#e8f0ff;align-self:flex-end;}
+.assistant{color:#004400;background:#e9f8e9;}
+#chatBox h1,#chatBox h2,#chatBox h3{margin:4px 0 3px 0;line-height:1.2em;}
+#chatBox p{margin:3px 0;}
+#chatBox ul,#chatBox ol{margin:3px 0 3px 20px;padding-left:18px;}
+#chatBox li{margin:2px 0;}
+#chatBox br{line-height:0.8em;}
+#inputRow{display:flex;margin-top:10px;}
+#userInput{flex:1;padding:10px;border:1px solid #aaa;border-radius:5px;}
+#sendBtn{padding:10px 20px;margin-left:10px;margin-bottom:10px;background:#0078d7;color:#fff;border:none;border-radius:5px;cursor:pointer;}
+#sendBtn:hover{background:#005fa3;}
+label{font-weight:bold;display:block;margin-top:10px;}
+textarea,input,select{width:100%;margin-bottom:10px;padding:10px;box-sizing:border-box;}
+#costDisplay{font-size:13px;color:#333;margin-top:8px;line-height:1.3em;position:sticky;bottom:0;background:#fafafa;padding:6px;border-top:1px solid #ddd;}
+#totalDisplay{font-weight:bold;color:#007700;}
+</style>
+</head>
+<body>
+
+<!-- Left Half -->
+<div id="left">
+  <h2>Chat Window</h2>
+  <div id="chatBox"></div>
+  <div id="inputRow">
+    <input type="text" id="userInput" placeholder="Type your message..." />
+    <button id="sendBtn">Send</button>
+  </div>
+  <div id="costDisplay"></div>
+</div>
+
+<!-- Right Half -->
+<div id="right">
+  <h2>Context & Configuration</h2>
+  <label>OpenAI API Key:</label>
+  <input type="password" id="apiKey" placeholder="Enter your OpenAI API key">
+
+  <label>Model:</label>
+  <select id="modelSelect">
+    <option value="gpt-4o-mini">gpt-4o-mini</option>
+    <option value="gpt-4o">gpt-4o</option>
+  </select>
+
+  <label>Upload FAQ Documents:</label>
+  <input type="file" id="faqUpload" multiple accept=".txt,.md" />
+  <div id="faqList"></div>
+
+  <label>Conversation Context:</label>
+  <textarea id="contextBox" rows="10" placeholder="Enter user context..."></textarea>
+  <button id="endSessionBtn" style="background:#ff5c5c;color:white;padding:10px 20px;border:none;border-radius:5px;">End Session</button>
+</div>
+
+<script>
+// Allow pressing Enter to send message
+document.getElementById("userInput").addEventListener("keydown", function(e) {
+  if (e.key === "Enter" && !e.shiftKey) {   // Pressing Enter (without Shift)
+    e.preventDefault();                     // Prevent newline
+    document.getElementById("sendBtn").click();  // Trigger send button
+  }
+});
+
+// === Markdown converter ===
+function formatMarkdown(text) {
+  // --- Headings ---
+  text = text.replace(/^### (.*$)/gim, '<h3>$1</h3>');
+  text = text.replace(/^## (.*$)/gim, '<h2>$1</h2>');
+  text = text.replace(/^# (.*$)/gim, '<h1>$1</h1>');
+
+  // --- Lists ---
+  text = text.replace(/^\s*\d+\.\s+(.*)$/gim, '<li>$1</li>'); // numbered
+  text = text.replace(/^\s*[-*]\s+(.*)$/gim, '<li>$1</li>');  // bullets
+
+  // Wrap <li> groups in <ul>
+  text = text.replace(/(<li>[\s\S]*?<\/li>)/gims, '<ul>$1</ul>');
+
+  // --- Formatting ---
+  text = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+  text = text.replace(/_(.*?)_/g, '<em>$1</em>');
+  text = text.replace(/__(.*?)__/g, '<u>$1</u>');
+
+  // --- Normalize newlines ---
+  text = text.replace(/\n{2,}/g, '\n');
+
+  // --- Add <br> only when not following or preceding headings, lists, or list items ---
+  text = text.replace(/(?<!<\/(li|ul|h1|h2|h3)>)\n(?!<li>|<\/ul>)/g, '<br>');
+
+  return text;
+}
+
+// === Cost estimator ===
+function estimateAssistantCost(model, promptTokens, completionTokens, options = {}) {
+  let promptRate = 0, completionRate = 0;
+  switch (model) {
+    case "gpt-4o-mini":
+      promptRate = 0.00015; completionRate = 0.0006; break;
+    case "gpt-4o":
+      promptRate = 0.005; completionRate = 0.015; break;
+    default:
+      throw new Error(`Unsupported model: ${model}`);
+  }
+  const promptCost = (promptTokens / 1000) * promptRate;
+  const completionCost = (completionTokens / 1000) * completionRate;
+  const { fileSearchRuns = 0, codeInterpreterRuns = 0, storageGBDays = 0 } = options;
+  const additionalCost = fileSearchRuns * 0.10 + codeInterpreterRuns * 0.20 + storageGBDays * 0.10;
+  return {
+    promptCost: promptCost.toFixed(6),
+    completionCost: completionCost.toFixed(6),
+    additionalCost: additionalCost.toFixed(6),
+    totalCost: (promptCost + completionCost + additionalCost).toFixed(6)
+  };
+}
+
+// === Core App ===
+let chatHistory = JSON.parse(localStorage.getItem("chatHistory")) || [];
+let totalCostSession = parseFloat(localStorage.getItem("totalCostSession") || "0");
+let faqText = "";
+
+window.onload = () => {
+  const apiKey = localStorage.getItem("apiKey");
+  const context = localStorage.getItem("context");
+  if (apiKey) document.getElementById("apiKey").value = apiKey;
+  if (context) document.getElementById("contextBox").value = context;
+  renderChat();
+  updateTotalCost();
+};
+
+document.getElementById("faqUpload").addEventListener("change", async (e) => {
+  const files = e.target.files;
+  faqText = "";
+  for (const file of files) {
+    const text = await file.text();
+    faqText += "\n\n" + text;
+  }
+  document.getElementById("faqList").innerText = `${files.length} file(s) loaded.`;
+  localStorage.setItem("faqDocs", faqText);
+});
+
+document.getElementById("sendBtn").addEventListener("click", async () => {
+  const userMessage = document.getElementById("userInput").value.trim();
+  if (!userMessage) return;
+
+  const apiKey = document.getElementById("apiKey").value.trim();
+  const model = document.getElementById("modelSelect").value;
+  const context = document.getElementById("contextBox").value.trim();
+  if (!apiKey) return alert("Please enter your API key");
+
+  localStorage.setItem("apiKey", apiKey);
+  localStorage.setItem("context", context);
+
+  chatHistory.push({ role: "user", content: userMessage });
+  renderChat();
+  document.getElementById("userInput").value = "";
+
+  const messages = [
+    { role: "system", content: "You are a helpful assistant that only answers using FAQ + user context. If unsure, say you don’t know." },
+    { role: "system", content: "User context:\n" + context },
+    { role: "system", content: "FAQ reference:\n" + (faqText || localStorage.getItem("faqDocs") || "") },
+    ...chatHistory.filter(m => m.role !== "meta") // ignore cost messages
+  ];
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + apiKey },
+      body: JSON.stringify({ model, messages, temperature: 0.3 })
+    });
+    const data = await response.json();
+    const reply = data.choices?.[0]?.message?.content || "No response from model.";
+
+    // Estimate cost
+    const promptTokens = Math.round(JSON.stringify(messages).length / 4);
+    const completionTokens = Math.round(reply.length / 4);
+    const cost = estimateAssistantCost(model, promptTokens, completionTokens);
+
+    totalCostSession += parseFloat(cost.totalCost);
+    localStorage.setItem("totalCostSession", totalCostSession.toFixed(6));
+
+    // Add assistant message with inline cost
+    chatHistory.push({
+      role: "assistant",
+      content: `${reply}\n\n<span style="font-size:12px;color:#666;">Prompt: ${cost.promptCost}$ | Completion: ${cost.completionCost}$ | Total: ${cost.totalCost}$</span>`
+    });
+    localStorage.setItem("chatHistory", JSON.stringify(chatHistory));
+
+    renderChat();
+    updateTotalCost();
+  } catch (err) {
+    alert("Error: " + err.message);
+  }
+});
+
+document.getElementById("endSessionBtn").addEventListener("click", () => {
+  if (confirm("End this conversation?")) {
+    chatHistory = [];
+    totalCostSession = 0;
+    localStorage.removeItem("chatHistory");
+    localStorage.removeItem("totalCostSession");
+    renderChat();
+    updateTotalCost();
+  }
+});
+
+function renderChat() {
+  const chatBox = document.getElementById("chatBox");
+  chatBox.innerHTML = chatHistory
+    .map(m => `<div class="message ${m.role}"><b>${m.role}:</b> ${formatMarkdown(m.content)}</div>`)
+    .join("");
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
+
+function updateTotalCost() {
+  const display = document.getElementById("costDisplay");
+  display.innerHTML =
+    `<b>Total Conversation Cost:</b> ${totalCostSession.toFixed(6)}$`;
+}
+</script>
+
+</body>
+</html>
